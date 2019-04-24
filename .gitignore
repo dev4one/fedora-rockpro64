@@ -1,0 +1,6 @@
+ayufan/*
+!ayufan/.keepme
+fedora/*
+!fedora/.keepme
+rootfs/*
+!rootfs/.keepme
