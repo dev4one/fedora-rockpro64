@@ -143,6 +143,19 @@ echo "Resize root partition (7) to ${rootSize}MB"
 echo "resizepart 7 ${rootSize}\n\q\n" | parted /dev/${targetDev}
 sync
 partprobe --summary /dev/${targetDev}
+sleep 2
+
+echo ""
+echo "Waiting for rootfs filesystem"
+max=30
+while [[ ${max} -gt 0 ]]
+do
+  test -b /dev/${targetDev}${rootPart} && break
+  sync
+  sleep 1
+  $((max--))
+done
+
 e2fsck -f /dev/${targetDev}${rootPart}
 resize2fs /dev/${targetDev}${rootPart}
 sync
@@ -166,7 +179,10 @@ tar --create \
     lib/modules \
     lib/firmware \
     vendor
-rm -fr ${rootfsDir}/*
+
+rm --force \
+   --recursive \
+   ${rootfsDir}/*
 
 loopDev=$(losetup --find \
                   --partscan \
@@ -174,7 +190,8 @@ loopDev=$(losetup --find \
                   --read-only \
                   ${fedoraImage})
 
-mount -o ro ${loopDev}p3 ${fedoraDir}
+mount --options ro \
+      ${loopDev}p3 ${fedoraDir}
 
 echo ""
 echo "Populating Fedora"
@@ -215,14 +232,16 @@ then
                        rpm --root ${rootfsDir} \
                            --query \
                            --all \
-                           name='kernel*' version=${version} ; \
+                           name='kernel*' version=${version} \
+                         | grep -v 'kernel-core-' ; \
                      done)
   rpm --root ${rootfsDir} \
       --erase \
       --nodeps \
       --noscripts \
       --verbose \
-      ${fedoraKernelPkgs}
+      ${fedoraKernelPkgs} 2>/dev/null
+  echo 'excludepkgs=kernel-*' >>${rootfsDir}/etc/dnf/dnf.conf
 fi
 
 echo ""
@@ -240,26 +259,29 @@ tar --extract \
     --directory=${rootfsDir} \
     --keep-directory-symlink \
     --numeric-owner 
-rm -f ${ayufanDir}/boot-saved.tar.xz
+
+rm --force \
+   ${ayufanDir}/boot-saved.tar.xz
 
 echo ""
 echo "Adding /etc/fstab"
 efiUUID=$(blkid /dev/${targetDev}${efiPart} -o export|grep '^UUID=')
 rootUUID=$(blkid /dev/${targetDev}${rootPart} -o export|grep '^UUID=')
-sed -e "/\/boot /d" \
-    -e "s/\(UUID=\)\(.*\) \/ \(.*\)/\1${rootUUID} \3/" \
-    -e "s/\(UUID=\)\(.*\) \/boot\/efi \(.*\)/\1${efiUUID} \3/" \
-    -i ${rootfsDir}/etc/fstab
+sed --expression="/\/boot /d" \
+    --expression="s/\(UUID=\)\(.*\) \(\/\) \(.*\)/${rootUUID} \3 \4/" \
+    --expression="s/\(UUID=\)\(.*\) \(\/boot\/efi\) \(.*\)/${efiUUID} \3 \4/" \
+    --in-place ${rootfsDir}/etc/fstab
 
 echo ""
 echo "Setting default password"
-sed -e 's|!locked|$6$Pq9Td3SsXA/MOyYt$UiPhI4OPOW2WUeLzZVZj.IiZHuMgI4zRycKdCVapdSGHzpmTl6gyuLTDyPTJJ09nnq.EXc..z489j1GceVoqU1|' \
-    -i ${rootfsDir}/etc/shadow
+sed --expression='s|!locked|$6$Pq9Td3SsXA/MOyYt$UiPhI4OPOW2WUeLzZVZj.IiZHuMgI4zRycKdCVapdSGHzpmTl6gyuLTDyPTJJ09nnq.EXc..z489j1GceVoqU1|' \
+    --in-place ${rootfsDir}/etc/shadow
 
 echo ""
 echo "Removing initial-setup"
-rm -f ${rootfsDir}/etc/systemd/system/graphical.target.wants/initial-setup.service
-rm -f ${rootfsDir}/etc/systemd/system/multi-user.target.wants/initial-setup.service
+sysdDir=/etc/systemd/system
+rm --force ${rootfsDir}${sysdDir}/graphical.target.wants/initial-setup.service
+rm --force ${rootfsDir}${sysdDir}/multi-user.target.wants/initial-setup.service
 
 cp finish-install.sh ${rootfsDir}/root/
 
