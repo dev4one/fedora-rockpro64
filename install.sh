@@ -2,17 +2,21 @@
 
 # Default value used if no arguments are provided
 targetDev=sdb
-fedoraImage=Fedora-Minimal-29-1.2.aarch64.raw
-debianImage=stretch-minimal-rockpro64-0.8.0rc9-1120-arm64.img
-rootSize=7500
-efiPart=6
-rootPart=7
+fedoraImage=Fedora-Minimal-32-1.6.aarch64.raw
+debianImage=buster-minimal-rockpro64-0.10.12-1184-arm64.img
+rootSize=9500
+efiPart=2
+bootPart=3
+rootPart=4
+noquestions=false
 
+bootfsDir=${PWD}/bootfs
 rootfsDir=${PWD}/rootfs
 fedoraDir=${PWD}/fedora
 ayufanDir=${PWD}/ayufan
 
-if   ! test -d ${rootfsDir} \
+if   ! test -d ${bootfsDir} \
+  || ! test -d ${rootfsDir} \
   || ! test -d ${fedoraDir} \
   || ! test -d ${ayufanDir}
 then
@@ -26,11 +30,11 @@ usage() {
   echo "            [--target=<targetdev>]"
   echo "            [--fedora-image=<FedoareImagePath>]"
   echo "            [--debian-image=<AyufanDebianImagePath>]"
-  echo "            [--root-size=<RootPartSizeMB>]"
+  echo "            [--root-size=<RootPartSizeInMiB>]"
+  echo "            [-y]"
   echo ""
 }
  
-
 while [[ "${1}" ]]
 do
   case "${1}" in
@@ -46,6 +50,7 @@ do
       if [[ "${targetDev:0:4}" == "loop" ]]
       then
         efiPart="p${efiPart}"
+        bootPart="p${bootPart}"
         rootPart="p${rootPart}"
       fi
     ;;
@@ -75,8 +80,16 @@ do
         rootSize="${2}"
         shift
       fi
+      if ! [[ ${rootSize} =~ ^[0-9]+$ ]]
+      then
+        echo "--root-size option can be numeric only! - Aborting"
+        exit 1
+      fi
     ;;
-    *)
+    --yes|-y)
+      noQuestions=true
+    ;;
+     *)
       usage
       exit 1
     ;;
@@ -86,14 +99,17 @@ done
 
 cat banner.txt
 
-echo "WARNING: Proceeding will result in the loss of ALL data on device /dev/${targetDev} !! "
-read -p "Are you sure you want to proceed [y,N]? " -r
-echo 
-if [[ ! ${REPLY} =~ ^[yY]$ ]] 
+if ! ${noQuestions}
 then
-  echo "Leaving flash process before any harm was done"
-  usage
-  exit 0
+  echo "WARNING: Proceeding will result in the loss of ALL data on device /dev/${targetDev} !! "
+  read -p "Are you sure you want to proceed [y,N]? " -r
+  echo 
+  if [[ ! ${REPLY} =~ ^[yY]$ ]] 
+  then
+    echo "Leaving flash process before any harm was done"
+    usage
+    exit 0
+  fi
 fi
 
 if mount | grep /dev/${targetDev} > /dev/null
@@ -138,47 +154,64 @@ sync
 sgdisk --move-second-header /dev/${targetDev}
 sync
 
-echo ""
-echo "Resize root partition (7) to ${rootSize}MB"
-echo "resizepart 7 ${rootSize}\n\q\n" | parted /dev/${targetDev}
-sync
-partprobe --summary /dev/${targetDev}
-sleep 2
+rootPartStart=$(parted -m /dev/${targetDev} unit MiB print | \
+                grep "^${rootPart}:" | \
+                awk -F: '{print $2}' | \
+                sed 's/MiB//')
+rootPartSize=$(parted -m /dev/${targetDev} unit MiB print | \
+               grep "^${rootPart}:" | \
+               awk -F: '{print $3}' | \
+               sed 's/MiB//')
 
-echo ""
-echo "Waiting for rootfs filesystem"
-max=30
-while [[ ${max} -gt 0 ]]
-do
-  test -b /dev/${targetDev}${rootPart} && break
+if [[ ${rootSize} -gt ${rootPartSize} ]]
+then
+  rootPartEnd=$((${rootPartStart} + ${rootSize}))
+  echo ""
+  echo "Resize root partition (${rootPart}) to ${rootSize}MiB"
+  echo "resizepart ${rootPart} ${rootPartEnd}MiB\n\q\n" | \
+       parted /dev/${targetDev}
   sync
-  sleep 1
-  $((max--))
-done
+  partprobe --summary /dev/${targetDev}
+  sleep 2
 
-e2fsck -f /dev/${targetDev}${rootPart}
-resize2fs /dev/${targetDev}${rootPart}
-sync
+  echo ""
+  echo "Waiting for rootfs filesystem"
+  max=30
+  while [[ ${max} -gt 0 ]]
+  do
+    test -b /dev/${targetDev}${rootPart} && break
+    sync
+    sleep 1
+    $((max--))
+  done
+
+  e2fsck -f /dev/${targetDev}${rootPart}
+  resize2fs /dev/${targetDev}${rootPart}
+  sync
+fi
+
+echo ""
+echo "Mounting $(basename ${bootfsDir}) filesystem"
+mount /dev/${targetDev}${bootPart} ${bootfsDir}
+rm --force \
+   ${bootfsDir}/filesystem.packages*
 
 echo ""
 echo "Mounting $(basename ${rootfsDir}) filesystem"
 mount /dev/${targetDev}${rootPart} ${rootfsDir}
 
-echo "Saving Ayufan Boot and Kernel"
+echo "Saving Ayufan rootfs Kernel artifacts"
 tar --create \
     --acls \
     --checkpoint=100 \
     --checkpoint-action=dot \
     --xattrs \
     --xz \
-    --file=${ayufanDir}/boot-saved.tar.xz \
+    --file=${ayufanDir}/kernel-saved.tar.xz \
     --directory=${rootfsDir} \
-    --exclude=filesystem.packages* \
-    boot \
     etc/firmware \
-    lib/modules \
     lib/firmware \
-    vendor
+    lib/modules
 
 rm --force \
    --recursive \
@@ -200,7 +233,9 @@ tar --create \
     --xattrs \
     --file=- \
     --directory=${fedoraDir} \
-    --exclude=boot \
+    --exclude=boot/* \
+    --exclude=tmp/* \
+    --exclude=etc/firmware \
     --exclude=lib/firmware \
     --exclude=lib/modules \
     . \
@@ -245,7 +280,7 @@ then
 fi
 
 echo ""
-echo "Adding kernel artifacts with Ayufan"
+echo "Adding rootfs Kernel artifacts from Ayufan"
 tar --extract \
     --acls \
     --checkpoint=100 \
@@ -255,25 +290,33 @@ tar --extract \
     --same-order \
     --xattrs \
     --xz \
-    --file=${ayufanDir}/boot-saved.tar.xz \
+    --file=${ayufanDir}/kernel-saved.tar.xz \
     --directory=${rootfsDir} \
     --keep-directory-symlink \
     --numeric-owner 
 
 rm --force \
-   ${ayufanDir}/boot-saved.tar.xz
+   ${ayufanDir}/kernel-saved.tar.xz
 
 echo ""
 echo "Adding /etc/fstab"
 efiUUID=$(blkid /dev/${targetDev}${efiPart} -o export|grep '^UUID=')
+bootUUID=$(blkid /dev/${targetDev}${bootPart} -o export|grep '^UUID=')
 rootUUID=$(blkid /dev/${targetDev}${rootPart} -o export|grep '^UUID=')
-sed --expression="/\/boot /d" \
+sed --expression="s/\(UUID=\)\(.*\) \(\/boot\) \(.*\)/${bootUUID} \3 \4/" \
     --expression="s/\(UUID=\)\(.*\) \(\/\) \(.*\)/${rootUUID} \3 \4/" \
     --expression="s/\(UUID=\)\(.*\) \(\/boot\/efi\) \(.*\)/${efiUUID} \3 \4/" \
     --in-place ${rootfsDir}/etc/fstab
 
 echo ""
-echo "Setting default password"
+echo "Updating kernel options"
+sed --expression="s#init=/sbin/init#systemd.unified_cgroup_hierarchy=0#" \
+    --expression="s#root=LABEL=linux-root#root=${rootUUID} quiet#" \
+    --expression="s#panic=10#loglevel=4 panic=10#" \
+    --in-place ${bootfsDir}/extlinux/extlinux.conf
+
+echo ""
+echo "Setting default root password to 'fedora'"
 sed --expression='s|!locked|$6$Pq9Td3SsXA/MOyYt$UiPhI4OPOW2WUeLzZVZj.IiZHuMgI4zRycKdCVapdSGHzpmTl6gyuLTDyPTJJ09nnq.EXc..z489j1GceVoqU1|' \
     --in-place ${rootfsDir}/etc/shadow
 
@@ -283,12 +326,19 @@ sysdDir=/etc/systemd/system
 rm --force ${rootfsDir}${sysdDir}/graphical.target.wants/initial-setup.service
 rm --force ${rootfsDir}${sysdDir}/multi-user.target.wants/initial-setup.service
 
+echo ""
+echo "Removing audit service (Ayufan does not include it in the kernel)"
+rm --force ${rootfsDir}${sysdDir}/graphical.target.wants/auditd.service
+rm --force ${rootfsDir}${sysdDir}/multi-user.target.wants/auditd.service
+
 cp finish-install.sh ${rootfsDir}/root/
 
 echo ""
 echo "Cleaning up"
 
 sync
+
+umount ${bootfsDir}
 umount ${rootfsDir}
 umount ${fedoraDir}
 losetup -d ${loopDev}
