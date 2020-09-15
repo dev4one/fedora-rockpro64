@@ -89,7 +89,7 @@ do
     --yes|-y)
       noQuestions=true
     ;;
-     *)
+    *)
       usage
       exit 1
     ;;
@@ -147,7 +147,11 @@ fi
 echo ""
 echo "Flashing Debian to '${targetDev}'"
 
-dd bs=1MB if=${debianImage} of=/dev/${targetDev} status=progress
+dd if=${debianImage} \
+   of=/dev/${targetDev} \
+   bs=1MB \
+   oflag=direct \
+   status=progress
 sync
 partprobe --summary /dev/${targetDev}
 sync
@@ -317,8 +321,14 @@ sed --expression="s#init=/sbin/init#systemd.unified_cgroup_hierarchy=0#" \
 
 echo ""
 echo "Setting default root password to 'fedora'"
-sed --expression='s|!locked|$6$Pq9Td3SsXA/MOyYt$UiPhI4OPOW2WUeLzZVZj.IiZHuMgI4zRycKdCVapdSGHzpmTl6gyuLTDyPTJJ09nnq.EXc..z489j1GceVoqU1|' \
-    --in-place ${rootfsDir}/etc/shadow
+
+rootEntry=$(grep '^root:' ${rootfsDir}/etc/shadow \
+            | awk -F':' \
+                  -v pass='$6$Pq9Td3SsXA/MOyYt$UiPhI4OPOW2WUeLzZVZj.IiZHuMgI4zRycKdCVapdSGHzpmTl6gyuLTDyPTJJ09nnq.EXc..z489j1GceVoqU1' \
+                  '{print $1":"pass":"$3":"$4":"$5":"$6":"$7":"$8":"$9}')
+sed --expression="s|^root:.*$|${rootEntry}|" \
+    --in-place \
+    ${rootfsDir}/etc/shadow
 
 echo ""
 echo "Removing initial-setup"
